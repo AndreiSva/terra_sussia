@@ -3,52 +3,86 @@ import random
 import numpy as np
 from math import pi, cos, sin, floor, sqrt
 from PIL import Image
+import logging
 
 class MapTerrain:
     SEA_LEVEL = 125
+    MOUNTAIN_LEVEL = 230
+    MOUNTAIN_SNOW_LEVEL = 245
     def __init__(self, size):
         self.size = size
-        self.terrain = np.zeros((size, size))
-        self.biomes = np.zeros((size, size))
-        self.colors = {
-            "Beach": (225, 227, 130),
-            "Mountain": (),
-            "Snow": (),
-            "Taiga": (),
-            "Grassland": (),
+        self.layers = {}
+        self.colours = {
+            "beach": (225, 227, 130),
+            "mountain": (112, 112, 112),
+            "snow": (205, 205, 205),
+            "desert": (),
+            "grassland": (50, 168, 82),
+            "water": (91, 139, 252),
         }
+
+    def _resize_matrix(self, smaller_matrix: np.ndarray) -> np.ndarray:
+        """Resize the matrix to the dimensions of the terrain"""
+
+        grid_x, grid_y = np.meshgrid(np.arange(self.size), np.arange(self.size))
+
+        def nearest_neighbour(x: int, y: int):
+            """This function assumes smaller_matrix has a range of [0, 255] and is square"""
+
+            size_ratio = smaller_matrix.shape[0] / self.size
+            
+            # calculate the small coordinates:
+            x_adj = min(floor(x * size_ratio), smaller_matrix.shape[1] - 1)
+            y_adj = min(floor(y * size_ratio), smaller_matrix.shape[0] - 1)
+
+            return smaller_matrix[y_adj, x_adj]
+            
+        # we apply nearest neighbor
+        result = np.vectorize(nearest_neighbour)(grid_x, grid_y)
+        return result
+
+    def add_layer(self, name, matrix: np.ndarray):
+        if matrix.shape[0] != matrix.shape[1]:
+            raise ValueError("Invalid Matrix Shape")
+        if matrix.shape != (self.size, self.size):
+            matrix = self._resize_matrix(matrix)
+        self.layers[name] = matrix.astype(np.uint8)
+
+    def get_layer(self, name: str) -> np.ndarray:
+        return self.layers[name]
         
-    def set(self, x, y, value):
-        self.terrain[y][x] = value
+    def set(self, layer: str, x: int, y: int, value: int):
+        self.layers[layer][y, x] = value
         
-    def get(self, x, y):
-        return self.terrain[y][x]
+    def get(self, layer: str, x: int, y: int) -> int:
+        if x >= self.size or y >= self.size:
+            raise IndexError("Invalid x or y position")
+        
+        return self.layers[layer][y, x]
     
-    def visualize(self, sea_level = 1):
+    def visualize(self):
         # TODO: make this actually good
-        normalized = self.terrain.astype(np.uint8)
+        terrain = self.get_layer("terrain")
 
         image = Image.new("RGB", (self.size, self.size))
         for y in range(self.size):
             for x in range(self.size):
-                color = (9, 138, 0)
-                if normalized[y][x] > 245:
-                    color = (205, 205, 205)
-                elif normalized[y][x] > 230:
-                    color = (112, 112, 112)
-                elif normalized[y][x] < self.SEA_LEVEL:
-                    color = (91, 139, 252)
-                elif normalized[y][x] < self.SEA_LEVEL + 5:
-                    color = (225, 227, 130)
+                color = self.colours["grassland"]
+                if terrain[y, x] > self.MOUNTAIN_SNOW_LEVEL:
+                    color = self.colours["snow"]
+                elif terrain[y, x] > self.MOUNTAIN_LEVEL:
+                    color = self.colours["mountain"]
+                elif terrain[y, x] < self.SEA_LEVEL:
+                    color = self.colours["water"]
+                elif terrain[y, x] < self.SEA_LEVEL + 5:
+                    color = self.colours["beach"]
                 else:
-                    color = (color[0], 255 - normalized[y][x] // 2, color[2])
+                    color = (color[0], 255 - terrain[y][x] // 2, color[2])
+                    
                 image.putpixel((x, y), color)
         
-        # image = Image.fromarray(normalized)
         image.show()
         return image
-    def set_terrain(self, terrain):
-        self.terrain = terrain
 
 class TerrainGenerator:
     NUM_PERMUTATIONS = 256
@@ -68,22 +102,25 @@ class TerrainGenerator:
             (1/sqrt(2), -1/sqrt(2)), (-1/sqrt(2), -1/sqrt(2))
         ]
 
-    def _random_grad(self, x, y):
-        xw = x % self.NUM_PERMUTATIONS
-        yw = y % self.NUM_PERMUTATIONS
+    def _random_grad(self, x: int, y: int, wrap: int):
+        x_wrapped = x % wrap
+        y_wrapped = y % wrap
+        
+        xw = x_wrapped % self.NUM_PERMUTATIONS
+        yw = y_wrapped % self.NUM_PERMUTATIONS
         i = self._permutations[(xw + self._permutations[yw]) % self.NUM_PERMUTATIONS]
         return self._directions[i % len(self._directions)]
 
-    def _smooth(self, x):
+    def _smooth(self, x: float):
         return x**3 * (x * (x * 6 - 15) + 10)
 
-    def _lerp(self, v0, v1, t):
+    def _lerp(self, v0: float, v1: float, t: float):
         return v0 + t * (v1 - v0)
 
-    def _dot(self, x, y):
+    def _dot(self, x: tuple, y: tuple):
         return x[0] * y[0] + x[1] * y[1]
 
-    def _perlin(self, x: float, y: float) -> float:
+    def _perlin(self, x: float, y: float, wrap: int) -> float:
         xfloor = floor(x)
         yfloor = floor(y)
         # corners of our cell
@@ -101,7 +138,7 @@ class TerrainGenerator:
         gradients = []
         distances = []
         for corner in cell_corners:
-            gradients.append(self._random_grad(corner[0], corner[1]))
+            gradients.append(self._random_grad(corner[0], corner[1], wrap))
             distances.append((x - corner[0], y - corner[1]))
 
         # doooot producctt between gradient and corresponding distance from point
@@ -120,22 +157,60 @@ class TerrainGenerator:
                            self._lerp(dot_products[2], dot_products[3], horiz_factor), vert_factor)
         
         return value
+
+    def _normalize(self, matrix: np.ndarray) -> np.ndarray:
+        return ((matrix - np.min(matrix)) / (np.max(matrix) - np.min(matrix)) * 255).astype(np.uint8)
     
-    def generate(self, size, octaves = 5, persistence = 0.5, freq = 0.005) -> MapTerrain:
-        new_map = MapTerrain(size)
-        terrain = new_map.terrain
+    def _generate_feature(self, size: int, octaves: int = 5, persistence: float = 0.5, freq: float = 0.005) -> np.ndarray:
+        feature = np.zeros((size, size))
         amp = 1
         for octave in range(octaves):
             # some kewl numpy magic
             grid_x, grid_y = np.meshgrid(np.arange(size) * freq, np.arange(size) * freq)
-            noise = np.vectorize(self._perlin)(grid_x, grid_y)
-            terrain += noise * amp
+
+            # we need to recalculate the wrap period for each octave because the frequency
+            # changes
+            current_wrap = int(np.floor(size * freq))
+            
+            noise = np.vectorize(self._perlin, excluded = {2})(grid_x, grid_y, current_wrap)
+            feature += noise * amp
 
             amp *= persistence
             freq *= 2
 
         # normalize to [0, 255]
-        terrain = (terrain - np.min(terrain)) / (np.max(terrain) - np.min(terrain)) * 255
+        feature = self._normalize(feature)
+        return feature
+
+    def _generate_terrain(self, size: int):
+        return self._generate_feature(size, 5, 0.5, 0.005)
+
+    def _generate_biome(self, size: int):
+        pass
+    
+    def _generate_ore(self, size: int):
+        return self._generate_feature(size, 5, 0.9, 0.01)
+
+    def _display_grayscale(self, matrix: np.ndarray):
+        """Useful for debugging or tweaking generation params"""
+        matrix = self._normalize(matrix)
+        image = Image.fromarray(matrix)
+        image.show()
+        return image
+
+    def generate(self, size: int):
+        logging.debug("Generating New Map...")        
+        new_map = MapTerrain(size)
+
+        logging.debug("Generating Terrain...")
+        terrain = self._generate_terrain(size)
+        logging.debug("Generating Biome...")
+        biome = self._generate_biome(size)
+        logging.debug("Generating Ore...")        
+        ore = self._generate_ore(size // 5)
+
+        new_map.add_layer("terrain", terrain)
+        new_map.add_layer("ore", ore)
         
-        new_map.terrain = terrain
         return new_map
+        
